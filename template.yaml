@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: ddb-kinesis
+
+Globals:
+  Function:
+    Timeout: 5
+    Runtime: go1.x
+    Handler: main
+    Tracing: Active
+
+Resources:
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration: true
+  DataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  DataStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      ShardCount: 1
+
+  DataPutter:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/data-putter
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource: !GetAtt DataTable.Arn
+      Events:
+        PutItemEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /
+            Method: GET
+            PayloadFormatVersion: "2.0"
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DataTable
+
+  StreamReader:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/stream-reader
+      Events:
+        ReadFromTheStreamEvent:
+          Type: Kinesis
+          Properties:
+            BatchSize: 1
+            StartingPosition: TRIM_HORIZON
+            Stream: !GetAtt DataStream.Arn
+            Enabled: true
+
+  StreamCaptureCreator:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/stream-capture-creator
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:EnableKinesisStreamingDestination
+              Resource: !GetAtt DataTable.Arn
+            - Effect: Allow
+              Action:
+                - iam:CreateServiceLinkedRole
+              Resource: "arn:aws:iam::*:role/aws-service-role/kinesisreplication.dynamodb.amazonaws.com/AWSServiceRoleForDynamoDBKinesisDataStreamsReplication"
+              # Condition:
+              #   StringLike:
+              #     "iam:AWSServiceName": "kinesisreplication.dynamodb.amazonaws.com"
+  StreamCaptureCreatorResource:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn:
+      - DataTable
+      - DataStream
+    Properties:
+      ServiceToken: !GetAtt StreamCaptureCreator.Arn
+      StreamArn: !GetAtt DataStream.Arn
+      TableName: !Ref DataTable
+
+Outputs:
+  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+  APIUrl:
+    Description: "API URL"
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/"
